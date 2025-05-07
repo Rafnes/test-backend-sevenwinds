@@ -2,18 +2,19 @@ package mobi.sevenwinds.app.budget
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import mobi.sevenwinds.app.author.AuthorEntity
 import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 
 object BudgetService {
-    suspend fun addRecord(body: BudgetRecord): BudgetRecord = withContext(Dispatchers.IO) {
+    suspend fun addRecord(body: BudgetCreateRequest): BudgetRecord = withContext(Dispatchers.IO) {
         transaction {
             val entity = BudgetEntity.new {
                 this.year = body.year
                 this.month = body.month
                 this.amount = body.amount
                 this.type = body.type
+                this.author = body.authorId?.let { AuthorEntity.findById(it) }
             }
 
             return@transaction entity.toResponse()
@@ -22,23 +23,26 @@ object BudgetService {
 
     suspend fun getYearStats(param: BudgetYearParam): BudgetYearStatsResponse = withContext(Dispatchers.IO) {
         transaction {
-            val query = BudgetTable
-                .select { BudgetTable.year eq param.year }
-                .orderBy (BudgetTable.month to SortOrder.ASC, BudgetTable.amount to SortOrder.DESC)
-                .limit(param.limit, param.offset)
+            val allRecords = BudgetEntity.find { BudgetTable.year eq param.year }
+                .orderBy(BudgetTable.month to SortOrder.ASC, BudgetTable.amount to SortOrder.DESC)
+                .toList()
 
-            val total = BudgetTable
-                .select { BudgetTable.year eq param.year }
-                .count()
-            val data = BudgetEntity.wrapRows(query).map { it.toResponse() }
-            val allRecords = BudgetEntity.find { BudgetTable.year eq param.year }.toList()
+            val filteredRecords = param.authorName?.let { nameFilter ->
+                allRecords.filter { entity ->
+                    val authorName = entity.author?.name
+                    authorName != null && authorName.contains(nameFilter, ignoreCase = true)
+                }
+            } ?: allRecords
 
-            val sumByType = allRecords.groupBy { it.type.name }.mapValues { it.value.sumOf { v -> v.amount } }
+            val pagedRecords = filteredRecords.drop(param.offset).take(param.limit)
+
+            val sumByType = filteredRecords.groupBy { it.type.name }
+                .mapValues { it.value.sumOf { v -> v.amount } }
 
             return@transaction BudgetYearStatsResponse(
-                total = total,
+                total = filteredRecords.size,
                 totalByType = sumByType,
-                items = data
+                items = pagedRecords.map { it.toResponse() }
             )
         }
     }
